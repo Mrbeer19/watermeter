@@ -5,7 +5,7 @@ import time
 
 # ---------------- CONFIG ----------------
 FB_URL = "https://water-meter-63992-default-rtdb.asia-southeast1.firebasedatabase.app"
-FB_AUTH = "YOUR_AUTH_KEY"
+FB_AUTH = "jDRjGrWe33KlNcSAKal3im182FzZfzUWEREfrIeC"  # ใส่ Auth Key ของคุณ
 
 st.set_page_config(page_title="Smart Water Meter Pro", layout="wide")
 
@@ -30,7 +30,6 @@ def calculate_pwa_bill(litres, service_fee):
     ]
 
     remaining = units
-
     for limit, rate in steps:
         if remaining <= 0:
             break
@@ -49,9 +48,21 @@ def calculate_pwa_bill(litres, service_fee):
 with st.sidebar:
     st.header("⚙️ Meter Settings")
 
+    # เลือกขนาดท่อ
     selected_size = st.selectbox("เลือกขนาดมาตรวัดน้ำ", list(METER_CONFIG.keys()))
     current_service_fee = METER_CONFIG[selected_size]
     st.info(f"ค่าบริการรายเดือน: {current_service_fee} ฿")
+
+    # ส่งค่าไป Firebase (ให้ ESP ดึง)
+    if st.button("อัปเดตขนาดท่อไป Firebase", use_container_width=True):
+        try:
+            requests.put(f"{FB_URL}/meter/config.json?auth={FB_AUTH}", json={
+                "pipeSize": selected_size,
+                "serviceFee": current_service_fee
+            })
+            st.success("อัปเดตขนาดท่อและค่าบริการไป Firebase เรียบร้อยแล้ว")
+        except:
+            st.error("ไม่สามารถเชื่อมต่อ Firebase ได้")
 
     st.divider()
     st.subheader("🤖 Automation Control")
@@ -76,7 +87,6 @@ with st.sidebar:
 
 # ---------------- FETCH DATA ----------------
 firebase_online = True
-
 try:
     response = requests.get(f"{FB_URL}/.json?auth={FB_AUTH}", timeout=5)
     response.raise_for_status()
@@ -90,42 +100,35 @@ try:
 
     is_online = (time.time() - last_update) < 60
 
+    # ดึง serviceFee จาก Firebase config
+    config_data = meter.get("config", {})
+    current_service_fee = config_data.get("serviceFee", current_service_fee)
+
 except:
     total_l, flow_r, v_status = 0, 0, "N/A"
     is_online = False
     firebase_online = False
 
 # ================== MAIN UI ==================
-
 st.title("💧 Smart Water Meter System")
 
 tab1, tab2 = st.tabs(["💧 Dashboard", "🧮 ตรวจสอบบิล กปภ."])
 
-# ================== TAB 1 ==================
+# ---------------- TAB 1: Dashboard ----------------
 with tab1:
 
     st.subheader("📡 System Status")
-
     col_s1, col_s2 = st.columns(2)
-
     with col_s1:
-        if is_online:
-            st.success("🟢 Device Status: ONLINE")
-        else:
-            st.error("🔴 Device Status: OFFLINE")
-
+        st.success("🟢 Device Status: ONLINE") if is_online else st.error("🔴 Device Status: OFFLINE")
     with col_s2:
-        if firebase_online:
-            st.success("🟢 Firebase: CONNECTED")
-        else:
-            st.error("🔴 Firebase: DISCONNECTED")
+        st.success("🟢 Firebase: CONNECTED") if firebase_online else st.error("🔴 Firebase: DISCONNECTED")
 
     st.divider()
 
-    # -------- GAUGE --------
+    # -------- GAUGE & Total Usage --------
     col_g1, col_g2 = st.columns(2)
     MAX_FLOW = 30
-
     with col_g1:
         fig = go.Figure(go.Indicator(
             mode="gauge+number",
@@ -152,46 +155,22 @@ with tab1:
     st.divider()
 
     # -------- BILL SUMMARY --------
-    final_p, u_total, v_val, w_only = calculate_pwa_bill(
-        total_l,
-        current_service_fee
-    )
-
+    final_p, u_total, v_val, w_only = calculate_pwa_bill(total_l, current_service_fee)
     m1, m2, m3 = st.columns(3)
     m1.metric("หน่วยที่ใช้", f"{u_total:.3f} m³")
     m2.metric("ค่าน้ำโดยประมาณ", f"{final_p:,.2f} ฿")
     m3.metric("สถานะวาล์ว", v_status)
 
-    st.divider()
-
-    # -------- MANUAL CONTROL --------
-    st.subheader("🕹️ Manual Control")
-
-    c1, c2, c3 = st.columns(3)
-
-    if c1.button("🟢 Open Valve", use_container_width=True):
-        requests.put(f"{FB_URL}/control/valve.json?auth={FB_AUTH}", json="ON")
-
-    if c2.button("🔴 Close Valve", use_container_width=True):
-        requests.put(f"{FB_URL}/control/valve.json?auth={FB_AUTH}", json="OFF")
-
-    if c3.button("🔄 Reset Meter", use_container_width=True):
-        requests.put(f"{FB_URL}/meter/totalLitres.json?auth={FB_AUTH}", json=0)
-        st.rerun()
-
-# ================== TAB 2 ==================
+# ---------------- TAB 2: ตรวจสอบบิล ----------------
 with tab2:
 
     st.subheader("🧮 เครื่องคิดเลขตรวจสอบบิล กปภ.")
-
     if "calc_units" not in st.session_state:
         st.session_state.calc_units = 0.0
-
     if "alert_msg" not in st.session_state:
         st.session_state.alert_msg = None
 
     col1, col2 = st.columns([2,1])
-
     with col1:
         calc_units = st.number_input(
             "ใส่จำนวนหน่วยที่ต้องการเช็ค (m³)",
@@ -199,56 +178,25 @@ with tab2:
             value=st.session_state.calc_units,
             key="calc_input"
         )
-
     with col2:
         if st.button("📡 ดึงข้อมูลจากมิเตอร์", use_container_width=True):
             try:
-                response = requests.get(
-                    f"{FB_URL}/meter/totalLitres.json?auth={FB_AUTH}",
-                    timeout=5
-                )
-                latest_litres = response.json()
-
-                if latest_litres is None:
-                    raise Exception("No data")
-
+                latest_litres = requests.get(f"{FB_URL}/meter/totalLitres.json?auth={FB_AUTH}", timeout=5).json()
                 st.session_state.calc_units = round(latest_litres / 1000, 3)
                 st.session_state.alert_msg = ("success", "ดึงข้อมูลจากมิเตอร์เรียบร้อยแล้ว")
-
             except:
                 st.session_state.alert_msg = ("error", "ดึงข้อมูลไม่สำเร็จ")
 
-    # แสดง Alert Box
     if st.session_state.alert_msg:
         alert_type, alert_text = st.session_state.alert_msg
-        if alert_type == "success":
-            st.success(alert_text)
-        else:
-            st.error(alert_text)
-
-        # เคลียร์ alert หลังแสดง
+        st.success(alert_text) if alert_type == "success" else st.error(alert_text)
         st.session_state.alert_msg = None
 
-    # sync ค่า
-    st.session_state.calc_units = st.session_state.get("calc_input", 0.0)
-
-    calc_size = st.selectbox(
-        "เลือกขนาดท่อ",
-        list(METER_CONFIG.keys())
-    )
-
+    calc_size = st.selectbox("เลือกขนาดท่อ", list(METER_CONFIG.keys()))
     if st.button("คำนวณบิล"):
-        result, _, vat, water_cost = calculate_pwa_bill(
-            st.session_state.calc_units * 1000,
-            METER_CONFIG[calc_size]
-        )
-
+        result, _, vat, water_cost = calculate_pwa_bill(st.session_state.calc_units * 1000, METER_CONFIG[calc_size])
         st.markdown(f"## 💰 ยอดสุทธิ: {result:,.2f} บาท")
-        st.write(
-            f"ค่าน้ำ: {water_cost:.2f} | "
-            f"ค่าบริการ: {METER_CONFIG[calc_size]} | "
-            f"VAT 7%: {vat:.2f}"
-        )
+        st.write(f"ค่าน้ำ: {water_cost:.2f} | ค่าบริการ: {METER_CONFIG[calc_size]} | VAT 7%: {vat:.2f}")
 
 # ---------------- AUTO REFRESH ----------------
 time.sleep(5)
