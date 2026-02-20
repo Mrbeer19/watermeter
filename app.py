@@ -3,12 +3,13 @@ import requests
 import plotly.graph_objects as go
 import time
 
-# ---------------- CONFIG ----------------
+# ---------------- CONFIG (ตรวจสอบ URL และ AUTH ให้ถูกต้อง) ----------------
 FB_URL = "https://water-meter-63992-default-rtdb.asia-southeast1.firebasedatabase.app"
 FB_AUTH = "jDRjGrWe33KlNcSAKal3im182FzZfzUWEREfrIeC"
 
 st.set_page_config(page_title="Smart Water Meter Pro", layout="wide")
 
+# ---------------- METER CONFIG ----------------
 METER_CONFIG = {
     "Ø 1/2 นิ้ว (4 หุน)": 30.0,
     "Ø 3/4 นิ้ว (6 หุน)": 40.0,
@@ -17,6 +18,7 @@ METER_CONFIG = {
     "Ø 2 นิ้ว": 300.0
 }
 
+# ---------------- BILL CALCULATION ----------------
 def calculate_pwa_bill(litres, service_fee):
     units = litres / 1000
     water_cost = 0.0
@@ -27,6 +29,7 @@ def calculate_pwa_bill(litres, service_fee):
         used = min(remaining, limit)
         water_cost += used * rate
         remaining -= used
+    
     water_cost = round(water_cost, 2)
     subtotal = water_cost + service_fee
     vat = round(subtotal * 0.07, 2)
@@ -65,13 +68,9 @@ try:
     flow_r = meter.get("flowRate", 0.0)
     v_status = meter.get("waterStatus", "OFF")
     
-    # ดึงค่า Timestamp (Firebase มักส่งมาเป็นมิลลิวินาที)
+    # แก้ Offline: เทียบ Firebase Server Timestamp (ms) กับเวลาปัจจุบัน
     last_update_ms = meter.get("lastUpdate", 0)
-    
-    # สูตรเช็ค Online: ถ้าเวลาปัจจุบัน (ms) ห่างจาก lastUpdate ไม่เกิน 60 วินาที (60000 ms)
-    # เราใช้เวลาจาก Server (โดยประมาณผ่าน time.time()) มาเปรียบเทียบ
-    current_time_ms = time.time() * 1000
-    is_online = (current_time_ms - last_update_ms) < 60000 
+    is_online = (time.time() * 1000 - last_update_ms) < 60000 
 except:
     total_l, flow_r, v_status, is_online = 0, 0, "N/A", False
 
@@ -79,6 +78,7 @@ except:
 st.title("💧 Smart Water Meter System")
 tab1, tab2 = st.tabs(["💧 Dashboard", "🧮 ตรวจสอบบิล กปภ."])
 
+# ================== TAB 1: DASHBOARD ==================
 with tab1:
     col_s1, col_s2 = st.columns(2)
     with col_s1: 
@@ -97,9 +97,8 @@ with tab1:
         st.metric("Total Water Used", f"{total_l:,.2f} Litres")
 
     st.divider()
+    # คำนวณยอดเงินรวม (ส่งไปให้หน้าจอเครื่องโชว์)
     final_p, u_total, v_val, w_only = calculate_pwa_bill(total_l, current_service_fee)
-
-    # ส่งค่าบิลที่คำนวณแล้วไปให้ ESP8266
     try:
         requests.put(f"{FB_URL}/meter/calculatedBill.json?auth={FB_AUTH}", json=final_p)
     except: pass
@@ -118,13 +117,38 @@ with tab1:
         requests.put(f"{FB_URL}/meter/totalLitres.json?auth={FB_AUTH}", json=0)
         st.rerun()
 
+# ================== TAB 2: BILL CALCULATOR (โครงสร้างเดิมที่ห้ามลบ) ==================
 with tab2:
     st.subheader("🧮 เครื่องคิดเลขตรวจสอบบิล กปภ.")
-    calc_units = st.number_input("จำนวนหน่วย (m³)", min_value=0.0, step=0.1)
-    calc_size = st.selectbox("ขนาดท่อ", list(METER_CONFIG.keys()))
+    if "calc_units" not in st.session_state: st.session_state.calc_units = 0.0
+    if "alert_msg" not in st.session_state: st.session_state.alert_msg = None
+
+    col1, col2 = st.columns([2,1])
+    with col1:
+        calc_units = st.number_input("จำนวนหน่วย (m³)", min_value=0.0, value=st.session_state.calc_units, key="calc_input")
+    with col2:
+        if st.button("📡 ดึงข้อมูลจากมิเตอร์", use_container_width=True):
+            try:
+                resp = requests.get(f"{FB_URL}/meter/totalLitres.json?auth={FB_AUTH}", timeout=5)
+                latest_l = resp.json()
+                if latest_l is not None:
+                    st.session_state.calc_units = round(latest_l / 1000, 3)
+                    st.session_state.alert_msg = ("success", "ดึงข้อมูลเรียบร้อยแล้ว")
+                else: raise Exception("No data")
+            except: st.session_state.alert_msg = ("error", "ดึงข้อมูลไม่สำเร็จ")
+
+    if st.session_state.alert_msg:
+        at, msg = st.session_state.alert_msg
+        if at == "success": st.success(msg)
+        else: st.error(msg)
+        st.session_state.alert_msg = None
+
+    st.session_state.calc_units = st.session_state.get("calc_input", 0.0)
+    c_size = st.selectbox("เลือกขนาดท่อ", list(METER_CONFIG.keys()))
     if st.button("คำนวณบิล"):
-        res, _, vat, w_cost = calculate_pwa_bill(calc_units * 1000, METER_CONFIG[calc_size])
+        res, _, vat, w_c = calculate_pwa_bill(st.session_state.calc_units * 1000, METER_CONFIG[c_size])
         st.markdown(f"## 💰 ยอดสุทธิ: {res:,.2f} บาท")
+        st.write(f"ค่าน้ำ: {w_c:.2f} | ค่าบริการ: {METER_CONFIG[c_size]} | VAT 7%: {vat:.2f}")
 
 time.sleep(5)
 st.rerun()
